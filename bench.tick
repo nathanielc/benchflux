@@ -1,0 +1,75 @@
+// Define a time over which all benchmarks runs will
+// be averaged and compared.
+var agg_period = 1h
+
+// Query raw benchmarks
+var current = batch
+    |query('''
+    SELECT
+        mean("iterations") as iterations,
+        mean("ns_per_op") as ns_per_op,
+        mean("mb_per_s") as mb_per_s,
+        mean("alloced_bytes_per_op") as alloced_bytes_per_op,
+        mean("allocs_per_op") as allocs_per_op
+    FROM benchmarks."default".kapacitor
+''')
+        .align()
+        .period(agg_period)
+        .every(agg_period)
+        .groupBy('benchmark', 'index')
+    // shift forward because the mean returns the start time and we want
+    // the stop time.
+    |shift(agg_period)
+
+// Write summary means back to InfluxDB
+current
+    |influxDBOut()
+        .database('benchmarks')
+        .retentionPolicy('default')
+        .measurement('kapacitor_summary')
+        .precision('s')
+        .flushInterval(1s)
+
+// Query summary data and compute period over period differences.
+var previous = batch
+    |query('''
+        SELECT
+            iterations,
+            ns_per_op,
+            mb_per_s,
+            alloced_bytes_per_op,
+            allocs_per_op
+        FROM benchmarks."default".kapacitor_summary
+''')
+        .align()
+        .period(agg_period)
+        .every(agg_period)
+        .offset(agg_period)
+        .groupBy('benchmark', 'index')
+    |shift(agg_period)
+
+previous
+    |join(current)
+        .as('previous', 'current')
+        .fill('none')
+    |eval(
+        lambda: "current.iterations" / "previous.iterations",
+        lambda: "current.ns_per_op" / "previous.ns_per_op",
+        lambda: "current.mb_per_s" / "previous.mb_per_s",
+        lambda: "current.alloced_bytes_per_op" / "previous.alloced_bytes_per_op",
+        lambda: "current.allocs_per_op" / "previous.allocs_per_op"
+    )
+        .as(
+            'iterations',
+            'ns_per_op',
+            'mb_per_s',
+            'alloced_bytes_per_op',
+            'allocs_per_op'
+        )
+        .quiet()
+    |influxDBOut()
+        .database('benchmarks')
+        .retentionPolicy('default')
+        .measurement('kapacitor_change')
+        .precision('s')
+        .flushInterval(1s)
